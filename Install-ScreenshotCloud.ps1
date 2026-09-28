@@ -1,5 +1,5 @@
 
-# ScreenshotCloud - Silent Installer
+# ScreenshotCloud - Fully Unattended Installer
 # Windows PowerShell 5.1+
 
 $ErrorActionPreference = "Stop"
@@ -7,10 +7,10 @@ $ErrorActionPreference = "Stop"
 # Website
 $Site = "https://sscloud.vercel.app"
 
-# Public uploader hosted on GitHub
+# Public GitHub uploader
 $UploaderUrl = "https://raw.githubusercontent.com/darkhackrrr/sscloud/main/Screenshot.ps1"
 
-# Installation paths
+# Local paths
 $InstallDir = Join-Path $env:LOCALAPPDATA "ScreenshotCloud"
 $TargetScript = Join-Path $InstallDir "Screenshot.ps1"
 $ConfigFile = Join-Path $InstallDir "config.ps1"
@@ -20,8 +20,6 @@ New-Item -ItemType Directory -Path $InstallDir -Force |
     Out-Null
 
 # Download uploader
-Write-Host "Downloading ScreenshotCloud..." -ForegroundColor Cyan
-
 $TempScript = Join-Path $env:TEMP "ScreenshotCloud-Download.ps1"
 
 Invoke-WebRequest `
@@ -29,78 +27,43 @@ Invoke-WebRequest `
     -OutFile $TempScript `
     -UseBasicParsing
 
-# Verify the download is a script, not a 404 HTML page
-$DownloadedContent = Get-Content -LiteralPath $TempScript -Raw
+# Validate download
+$Content = Get-Content -LiteralPath $TempScript -Raw
 
 if (
-    [string]::IsNullOrWhiteSpace($DownloadedContent) -or
-    $DownloadedContent -match '(?i)<!DOCTYPE html|<html'
+    [string]::IsNullOrWhiteSpace($Content) -or
+    $Content -match '(?i)<!DOCTYPE html|<html'
 ) {
     Remove-Item $TempScript -Force -ErrorAction SilentlyContinue
-    throw "Download failed. Check that Screenshot.ps1 exists in the GitHub repository root."
+    throw "ScreenshotCloud: Uploader download failed."
 }
 
-Move-Item -LiteralPath $TempScript -Destination $TargetScript -Force
+# Install uploader
+Move-Item `
+    -LiteralPath $TempScript `
+    -Destination $TargetScript `
+    -Force
 
-Write-Host "Uploader downloaded." -ForegroundColor Green
-
-# Configure upload key locally
-if (Test-Path $ConfigFile) {
-    Write-Host "Existing configuration found." -ForegroundColor Yellow
-    $KeepConfig = Read-Host "Keep existing upload key? (Y/N)"
-
-    if ($KeepConfig -notmatch '^(Y|y)$') {
-        Remove-Item -LiteralPath $ConfigFile -Force
-    }
-}
-
+# Preserve existing config.
+# If no config exists, create one without a secret.
 if (-not (Test-Path $ConfigFile)) {
-
-    Write-Host ""
-    Write-Host "Enter your Vercel upload key." -ForegroundColor Cyan
-    Write-Host "Input is hidden. The key is saved locally." -ForegroundColor Gray
-
-    $SecureKey = Read-Host "Upload key" -AsSecureString
-
-    if ($SecureKey.Length -eq 0) {
-        throw "Upload key cannot be empty."
-    }
-
-    # Convert secure input to plain text only for the local config
-    $BSTR = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureKey)
-
-    try {
-        $UploadKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($BSTR)
-    }
-    finally {
-        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
-        $SecureKey.Dispose()
-    }
-
-    $SafeSite = $Site.Replace("'", "''")
-    $SafeKey = $UploadKey.Replace("'", "''")
-
     @"
-`$Site = '$SafeSite'
-`$UploadKey = '$SafeKey'
+`$Site = '$Site'
+`$UploadKey = ''
 "@ | Set-Content -LiteralPath $ConfigFile -Encoding UTF8
-
-    # Clear temporary variable
-    $UploadKey = $null
-    $SafeKey = $null
 }
 
-# Restrict config access to current Windows user and SYSTEM
+# Restrict config permissions
 $Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
 & icacls.exe $ConfigFile /inheritance:r /grant:r "$($Identity):(F)" "SYSTEM:(F)" |
     Out-Null
 
 if ($LASTEXITCODE -ne 0) {
-    throw "Could not secure the configuration file permissions."
+    throw "ScreenshotCloud: Could not secure config permissions."
 }
 
-# Install PowerShell command in current user's profile
+# PowerShell profile
 $ProfilePath = $PROFILE.CurrentUserCurrentHost
 $ProfileDir = Split-Path -Parent $ProfilePath
 
@@ -112,8 +75,8 @@ if (-not (Test-Path $ProfilePath)) {
         Out-Null
 }
 
+# Install or update the command
 $Marker = "# ScreenshotCloud Installed"
-$ExistingProfile = Get-Content $ProfilePath -Raw -ErrorAction SilentlyContinue
 
 $FunctionBlock = @"
 # ScreenshotCloud Installed
@@ -122,16 +85,16 @@ function ScreenshotCloud {
 }
 "@
 
-if ($ExistingProfile -match '(?s)# ScreenshotCloud Installed.*?function ScreenshotCloud\s*\{.*?\}') {
+$ExistingProfile = Get-Content -LiteralPath $ProfilePath -Raw -ErrorAction SilentlyContinue
 
+if ($ExistingProfile -match '(?s)# ScreenshotCloud Installed.*?function ScreenshotCloud\s*\{.*?\}') {
     $UpdatedProfile = [regex]::Replace(
         $ExistingProfile,
         '(?s)# ScreenshotCloud Installed.*?function ScreenshotCloud\s*\{.*?\}',
         [System.Text.RegularExpressions.MatchEvaluator]{
-            param($match)
+            param($Match)
             $FunctionBlock
-        },
-        1
+        }
     )
 
     Set-Content -LiteralPath $ProfilePath -Value $UpdatedProfile -Encoding UTF8
@@ -140,6 +103,5 @@ else {
     Add-Content -LiteralPath $ProfilePath -Value "`r`n$FunctionBlock" -Encoding UTF8
 }
 
-Write-Host ""
 Write-Host "ScreenshotCloud installed successfully!" -ForegroundColor Green
 Write-Host "Open a new PowerShell window and type ScreenshotCloud"
