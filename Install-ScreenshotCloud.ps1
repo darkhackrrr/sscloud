@@ -4,11 +4,11 @@
 
 $ErrorActionPreference = "Stop"
 
-# CHANGE THIS to your real Vercel website
+# ScreenshotCloud website
 $Site = "https://sscloud.vercel.app"
 
-# Public download location for the uploader
-$UploaderUrl = "$Site/Screenshot.ps1"
+# Download uploader directly from GitHub (raw file)
+$UploaderUrl = "https://raw.githubusercontent.com/darkhackrrr/sscloud/main/Screenshot.ps1"
 
 # Local installation directory
 $InstallDir = Join-Path $env:LOCALAPPDATA "ScreenshotCloud"
@@ -19,15 +19,36 @@ $ConfigFile = Join-Path $InstallDir "config.ps1"
 New-Item -ItemType Directory -Path $InstallDir -Force |
     Out-Null
 
-# Download Screenshot.ps1 from Vercel
+# Download uploader into a temporary file first
+$TempScript = Join-Path $env:TEMP "ScreenshotCloud-Download.ps1"
+
 Invoke-WebRequest `
     -Uri $UploaderUrl `
-    -OutFile $TargetScript `
+    -OutFile $TempScript `
     -UseBasicParsing
+
+# Verify that GitHub returned a PowerShell script,
+# not an HTML error page.
+$DownloadedContent = Get-Content -LiteralPath $TempScript -Raw
+
+if (
+    [string]::IsNullOrWhiteSpace($DownloadedContent) -or
+    $DownloadedContent -match '(?i)<!DOCTYPE html|<html'
+) {
+    Remove-Item $TempScript -Force -ErrorAction SilentlyContinue
+    throw "Download failed: GitHub did not return a valid PowerShell script. Check the Screenshot.ps1 repository path."
+}
+
+# Install the uploader
+Move-Item `
+    -LiteralPath $TempScript `
+    -Destination $TargetScript `
+    -Force
 
 # Preserve existing config if it already exists.
 # The upload key must be configured locally.
 if (-not (Test-Path $ConfigFile)) {
+
     if ([string]::IsNullOrWhiteSpace($env:SCREENSHOT_UPLOAD_KEY)) {
         throw "Set SCREENSHOT_UPLOAD_KEY in your Windows user environment first."
     }
@@ -63,7 +84,23 @@ $Marker = "# ScreenshotCloud Installed"
 
 $ExistingProfile = Get-Content $ProfilePath -Raw -ErrorAction SilentlyContinue
 
-if ($ExistingProfile -notlike "*$Marker*") {
+# Replace the existing ScreenshotCloud function if already installed
+if ($ExistingProfile -match '(?s)# ScreenshotCloud Installed.*?(?=\r?\n# |\z)') {
+
+    $UpdatedProfile = [regex]::Replace(
+        $ExistingProfile,
+        '(?s)# ScreenshotCloud Installed.*?(?=\r?\n# |\z)',
+        @"
+# ScreenshotCloud Installed
+function ScreenshotCloud {
+    & "$TargetScript" @args
+}
+"@
+    )
+
+    Set-Content -LiteralPath $ProfilePath -Value $UpdatedProfile -Encoding UTF8
+}
+else {
     @"
 
 $Marker
@@ -73,5 +110,6 @@ function ScreenshotCloud {
 "@ | Add-Content -LiteralPath $ProfilePath -Encoding UTF8
 }
 
-Write-Host "ScreenshotCloud installed successfully!"
+Write-Host ""
+Write-Host "ScreenshotCloud installed successfully!" -ForegroundColor Green
 Write-Host "Open a new PowerShell window and type ScreenshotCloud"
