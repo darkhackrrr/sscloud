@@ -1,107 +1,163 @@
 
-# ScreenshotCloud - Fully Unattended Installer
-# Windows PowerShell 5.1+
+# ScreenshotCloud - Silent Installer
+# No prompts, no Read-Host, no environment variable required.
 
 $ErrorActionPreference = "Stop"
 
-# Website
-$Site = "https://sscloud.vercel.app"
-
-# Public GitHub uploader
+# URLs
 $UploaderUrl = "https://raw.githubusercontent.com/darkhackrrr/sscloud/main/Screenshot.ps1"
 
-# Local paths
+# Installation paths
 $InstallDir = Join-Path $env:LOCALAPPDATA "ScreenshotCloud"
-$TargetScript = Join-Path $InstallDir "Screenshot.ps1"
-$ConfigFile = Join-Path $InstallDir "config.ps1"
-
-# Create installation directory
-New-Item -ItemType Directory -Path $InstallDir -Force |
-    Out-Null
-
-# Download uploader
-$TempScript = Join-Path $env:TEMP "ScreenshotCloud-Download.ps1"
-
-Invoke-WebRequest `
-    -Uri $UploaderUrl `
-    -OutFile $TempScript `
-    -UseBasicParsing
-
-# Validate download
-$Content = Get-Content -LiteralPath $TempScript -Raw
-
-if (
-    [string]::IsNullOrWhiteSpace($Content) -or
-    $Content -match '(?i)<!DOCTYPE html|<html'
-) {
-    Remove-Item $TempScript -Force -ErrorAction SilentlyContinue
-    throw "ScreenshotCloud: Uploader download failed."
-}
-
-# Install uploader
-Move-Item `
-    -LiteralPath $TempScript `
-    -Destination $TargetScript `
-    -Force
-
-# Preserve existing config.
-# If no config exists, create one without a secret.
-if (-not (Test-Path $ConfigFile)) {
-    @"
-`$Site = '$Site'
-`$UploadKey = ''
-"@ | Set-Content -LiteralPath $ConfigFile -Encoding UTF8
-}
-
-# Restrict config permissions
-$Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-
-& icacls.exe $ConfigFile /inheritance:r /grant:r "$($Identity):(F)" "SYSTEM:(F)" |
-    Out-Null
-
-if ($LASTEXITCODE -ne 0) {
-    throw "ScreenshotCloud: Could not secure config permissions."
-}
+$UploaderPath = Join-Path $InstallDir "Screenshot.ps1"
+$ConfigPath = Join-Path $InstallDir "config.ps1"
 
 # PowerShell profile
-$ProfilePath = $PROFILE.CurrentUserCurrentHost
-$ProfileDir = Split-Path -Parent $ProfilePath
+$ProfilePath = $PROFILE
 
-New-Item -ItemType Directory -Path $ProfileDir -Force |
-    Out-Null
+Write-Host ""
+Write-Host "Installing ScreenshotCloud..." -ForegroundColor Cyan
 
-if (-not (Test-Path $ProfilePath)) {
-    New-Item -ItemType File -Path $ProfilePath -Force |
-        Out-Null
+# Create installation directory
+if (-not (Test-Path $InstallDir)) {
+    New-Item -Path $InstallDir -ItemType Directory -Force | Out-Null
 }
 
-# Install or update the command
-$Marker = "# ScreenshotCloud Installed"
+# Download uploader
+Write-Host "Downloading uploader..." -ForegroundColor Gray
 
-$FunctionBlock = @"
-# ScreenshotCloud Installed
-function ScreenshotCloud {
-    & "$TargetScript" @args
+try {
+    $Response = Invoke-WebRequest `
+        -Uri $UploaderUrl `
+        -UseBasicParsing `
+        -ErrorAction Stop
+
+    $UploaderContent = $Response.Content
+
+    if ([string]::IsNullOrWhiteSpace($UploaderContent)) {
+        throw "The downloaded uploader is empty."
+    }
+
+    if ($UploaderContent -match "(?i)^\s*<!DOCTYPE html|^\s*<html") {
+        throw "GitHub returned a webpage instead of the PowerShell script."
+    }
+
+    if ($UploaderContent -notmatch "param\s*\(|SCREENSHOT_UPLOAD_KEY|Upload") {
+        Write-Host "Warning: The downloaded file may not be the expected uploader." -ForegroundColor Yellow
+    }
+
+    Set-Content `
+        -Path $UploaderPath `
+        -Value $UploaderContent `
+        -Encoding UTF8 `
+        -Force
+
+    Write-Host "Uploader downloaded." -ForegroundColor Green
 }
-"@
+catch {
+    Write-Host "Failed to download uploader: $($_.Exception.Message)" -ForegroundColor Red
+    return
+}
 
-$ExistingProfile = Get-Content -LiteralPath $ProfilePath -Raw -ErrorAction SilentlyContinue
+# Create config only if it does not already exist.
+# Existing configuration and keys are preserved.
+if (-not (Test-Path $ConfigPath)) {
 
-if ($ExistingProfile -match '(?s)# ScreenshotCloud Installed.*?function ScreenshotCloud\s*\{.*?\}') {
-    $UpdatedProfile = [regex]::Replace(
-        $ExistingProfile,
-        '(?s)# ScreenshotCloud Installed.*?function ScreenshotCloud\s*\{.*?\}',
-        [System.Text.RegularExpressions.MatchEvaluator]{
-            param($Match)
-            $FunctionBlock
-        }
-    )
+    $ConfigContent = @'
+# ScreenshotCloud configuration
 
-    Set-Content -LiteralPath $ProfilePath -Value $UpdatedProfile -Encoding UTF8
+$Site = "https://sscloud.vercel.app"
+
+# Set this to a valid upload key if your backend requires one.
+# Do not put your private key in a public GitHub repository.
+$UploadKey = ""
+'@
+
+    Set-Content `
+        -Path $ConfigPath `
+        -Value $ConfigContent `
+        -Encoding UTF8 `
+        -Force
+
+    Write-Host "Configuration created." -ForegroundColor Green
 }
 else {
-    Add-Content -LiteralPath $ProfilePath -Value "`r`n$FunctionBlock" -Encoding UTF8
+    Write-Host "Existing configuration preserved." -ForegroundColor Yellow
 }
 
+# Set restrictive permissions on local configuration.
+try {
+    $CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+
+    & icacls.exe $ConfigPath /inheritance:r /grant:r "${CurrentUser}:(F)" | Out-Null
+
+    Write-Host "Configuration permissions secured." -ForegroundColor Green
+}
+catch {
+    Write-Host "Could not update configuration permissions." -ForegroundColor Yellow
+}
+
+# Ensure PowerShell profile directory exists
+$ProfileDirectory = Split-Path -Parent $ProfilePath
+
+if (-not (Test-Path $ProfileDirectory)) {
+    New-Item -Path $ProfileDirectory -ItemType Directory -Force | Out-Null
+}
+
+if (-not (Test-Path $ProfilePath)) {
+    New-Item -Path $ProfilePath -ItemType File -Force | Out-Null
+}
+
+# Command function
+$FunctionBlock = @'
+
+# ScreenshotCloud command
+function ScreenshotCloud {
+    $UploaderPath = Join-Path $env:LOCALAPPDATA "ScreenshotCloud\Screenshot.ps1"
+    $ConfigPath = Join-Path $env:LOCALAPPDATA "ScreenshotCloud\config.ps1"
+
+    if (-not (Test-Path $UploaderPath)) {
+        Write-Host "ScreenshotCloud uploader not found. Reinstall it." -ForegroundColor Red
+        return
+    }
+
+    if (Test-Path $ConfigPath) {
+        . $ConfigPath
+    }
+
+    & $UploaderPath
+}
+
+'@
+
+# Remove the old ScreenshotCloud function from the profile
+$ProfileContent = Get-Content -Path $ProfilePath -Raw -ErrorAction SilentlyContinue
+
+if ($null -eq $ProfileContent) {
+    $ProfileContent = ""
+}
+
+$Pattern = '(?ms)# ScreenshotCloud command\s*function ScreenshotCloud\s*\{.*?^\}'
+
+$ProfileContent = [regex]::Replace(
+    $ProfileContent,
+    $Pattern,
+    ""
+)
+
+# Append the updated function
+Set-Content `
+    -Path $ProfilePath `
+    -Value ($ProfileContent.TrimEnd() + "`r`n" + $FunctionBlock) `
+    -Encoding UTF8 `
+    -Force
+
+# Load command in current PowerShell session
+. $ProfilePath
+
+Write-Host ""
 Write-Host "ScreenshotCloud installed successfully!" -ForegroundColor Green
-Write-Host "Open a new PowerShell window and type ScreenshotCloud"
+Write-Host ""
+Write-Host "Run ScreenshotCloud to start the uploader." -ForegroundColor Cyan
+Write-Host "Installed at: $InstallDir" -ForegroundColor Gray
+Write-Host ""
